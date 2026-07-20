@@ -171,6 +171,9 @@ ghma_guard_env_token() {
     fi
 }
 
+# Sets B/R/RED/GRN/YEL/DIM for the caller to use. They look unused here because
+# every consumer is a separate file that sources this one.
+# shellcheck disable=SC2034
 ghma_colors() {
     if [ -t "${1:-1}" ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
         B=$(tput bold 2>/dev/null || echo ""); R=$(tput sgr0 2>/dev/null || echo "")
@@ -258,4 +261,6 @@ ghma_chain_repo_hook() {
 github_detect_account()   { ghma_detect_account; }
 github_config_dir()       { ghma_config_dir "$@"; }
 github_guard_env_token()  { ghma_guard_env_token; }
+# Consumed by sourcing scripts, hence "unused" here.
+# shellcheck disable=SC2034
 REAL_GH="$GH_REAL"

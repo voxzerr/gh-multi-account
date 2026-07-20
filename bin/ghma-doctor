@@ -49,8 +49,8 @@ else
 fi
 
 case ":$PATH:" in
-    *":$HOME/.local/bin:"*) pass "~/.local/bin is on PATH" ;;
-    *) warn "~/.local/bin is NOT on PATH — commands will be 'not found'" ;;
+    *":$HOME/.local/bin:"*) pass "$HOME/.local/bin is on PATH" ;;
+    *) warn "$HOME/.local/bin is NOT on PATH — commands will be 'not found'" ;;
 esac
 
 head_ "Git configuration"

@@ -185,12 +185,12 @@ assert_blocked "repo-local hook can still veto" g commit -m t
 
 # ----------------------------------------------------------- gh wrapper --
 group "gh account routing"
-cd "$H/Projects/work/a"
+cd "$H/Projects/work/a" || exit 1
 out="$(HOME="$H" "$BIN/gha" auto api user 2>&1)"
 if echo "$out" | grep -q "gh-work"; then ok "gha auto picks the repo's account"
 else bad "gha auto picks the repo's account" "$out"; fi
 
-cd "$SANDBOX"
+cd "$SANDBOX" || exit 1
 if HOME="$H" "$BIN/gha" auto api user >/dev/null 2>&1; then
     bad "gha auto refuses outside a known repo"
 else ok "gha auto refuses outside a known repo"; fi
@@ -201,7 +201,7 @@ else bad "env token is refused" "$out"; fi
 
 # ----------------------------------------------------------------- doctor --
 group "Doctor"
-cd "$H"
+cd "$H" || exit 1
 out="$(HOME="$H" "$BIN/ghma-doctor" --offline 2>&1)"; rc=$?
 if [ $rc -eq 0 ]; then ok "doctor passes on a healthy sandbox"
 else bad "doctor passes on a healthy sandbox" "$(echo "$out" | grep '✗' | head -3)"; fi

@@ -22,8 +22,8 @@ BEGIN_SSH="# >>> gh-multi-account >>>"
 END_SSH="# <<< gh-multi-account <<<"
 
 if [ -t 1 ]; then
-    B=$(tput bold); R=$(tput sgr0); RED=$(tput setaf 1); GRN=$(tput setaf 2); YEL=$(tput setaf 3); DIM=$(tput setaf 8)
-else B=""; R=""; RED=""; GRN=""; YEL=""; DIM=""; fi
+    B=$(tput bold); R=$(tput sgr0); RED=$(tput setaf 1); GRN=$(tput setaf 2); YEL=$(tput setaf 3)
+else B=""; R=""; RED=""; GRN=""; YEL=""; fi
 say()  { printf '%s%s%s\n' "$B" "$*" "$R"; }
 ok()   { printf '  %s✓%s %s\n' "$GRN" "$R" "$*"; }
 warn() { printf '  %s!%s %s\n' "$YEL" "$R" "$*"; }
@@ -127,7 +127,8 @@ fi
 
 backup() {  # backup <file>
     [ -e "$1" ] || return 0
-    local bak="$1.backup-$(date +%Y%m%d%H%M%S)"
+    local bak
+    bak="$1.backup-$(date +%Y%m%d%H%M%S)"
     cp "$1" "$bak"; ok "backed up ${1/#$HOME/~} -> ${bak##*/}"
 }
 strip_block() {  # strip_block <file> <begin> <end>  -> stdout
@@ -169,31 +170,57 @@ done
 warn "keys have no passphrase. Add one later with: ssh-keygen -p -f <key>"
 
 # --------------------------------------------------------------- known_hosts --
-if command -v python3 >/dev/null && command -v curl >/dev/null; then
+# Entirely optional: without it ssh simply asks you to confirm GitHub's
+# fingerprint once. So this must never be able to fail the install.
+#
+# It runs with `set +e` deliberately. Under `set -euo pipefail`, an assignment
+# from a pipeline whose first stage fails takes down the whole script — and
+# because stderr is suppressed here, it would die with no message at all.
+# That is exactly how this failed on newer macOS in CI.
+pin_host_keys() {
+    set +e
+    command -v curl >/dev/null || { warn "curl missing; skipping host key pinning"; return 0; }
+    command -v python3 >/dev/null || { warn "python3 missing; skipping host key pinning"; return 0; }
+
+    local fps scanned added=0 line fp body h
     fps="$(curl -sSL --max-time 15 https://api.github.com/meta 2>/dev/null \
-        | python3 -c 'import json,sys;print("\n".join(json.load(sys.stdin)["ssh_key_fingerprints"].values()))' 2>/dev/null || true)"
-    if [ -n "$fps" ]; then
-        touch "$HOME/.ssh/known_hosts"; chmod 600 "$HOME/.ssh/known_hosts"
-        added=0
-        while read -r line; do
-            [ -z "$line" ] && continue
-            fp="$(echo "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | sed 's|^SHA256:||')"
-            echo "$fps" | grep -qxF "$fp" || continue     # only trust published keys
-            body="$(echo "$line" | awk '{print $2" "$3}')"
-            grep -qF "$body" "$HOME/.ssh/known_hosts" 2>/dev/null && continue
-            for h in github.com "${ACCOUNTS[@]/#/github.com-}"; do
-                echo "$h $body" >> "$HOME/.ssh/known_hosts"
-            done
-            added=$((added+1))
-        done <<< "$(ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null)"
-        [ "$added" -gt 0 ] && ok "verified and pinned $added GitHub host key(s)" \
-                           || ok "GitHub host keys already known"
-    else
+        | python3 -c 'import json,sys;print("\n".join(json.load(sys.stdin)["ssh_key_fingerprints"].values()))' 2>/dev/null)"
+    if [ -z "$fps" ]; then
         warn "could not fetch GitHub's published host keys; ssh will ask once"
+        return 0
     fi
-else
-    warn "curl/python3 missing; skipping host key pinning (ssh will ask once)"
-fi
+
+    scanned="$(ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null)"
+    if [ -z "$scanned" ]; then
+        warn "could not reach github.com to read host keys; ssh will ask once"
+        return 0
+    fi
+
+    touch "$HOME/.ssh/known_hosts" 2>/dev/null
+    chmod 600 "$HOME/.ssh/known_hosts" 2>/dev/null
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        fp="$(printf '%s\n' "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | sed 's|^SHA256:||')"
+        [ -n "$fp" ] || continue
+        # only trust a key GitHub itself publishes the fingerprint for
+        printf '%s\n' "$fps" | grep -qxF "$fp" || continue
+        body="$(printf '%s\n' "$line" | awk '{print $2" "$3}')"
+        [ -n "$body" ] || continue
+        grep -qF "$body" "$HOME/.ssh/known_hosts" 2>/dev/null && continue
+        for h in github.com "${ACCOUNTS[@]/#/github.com-}"; do
+            printf '%s %s\n' "$h" "$body" >> "$HOME/.ssh/known_hosts"
+        done
+        added=$((added + 1))
+    done <<EOF
+$scanned
+EOF
+
+    if [ "$added" -gt 0 ]; then ok "verified and pinned $added GitHub host key(s)"
+    else ok "GitHub host keys already known"; fi
+    return 0
+}
+pin_host_keys || true
+set -euo pipefail
 
 # --------------------------------------------------------------- ssh config --
 SSHCFG="$HOME/.ssh/config"
@@ -288,7 +315,7 @@ if ! git config --global --get-all include.path 2>/dev/null | grep -qxF "$GITCFG
     git config --global --add include.path "$GITCFG"
     ok "added include to ~/.gitconfig"
 else
-    ok "~/.gitconfig already includes our config"
+    ok "git config already includes ours"
 fi
 
 if [ -n "$EXISTING_EMAIL" ] || [ -n "$EXISTING_NAME" ]; then
