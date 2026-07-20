@@ -122,6 +122,26 @@ git remote set-url origin git@github.com-work:acme/api.git
 git whoami   # confirm
 ```
 
+### Using more than one machine
+
+The account is chosen by **the folder a project is in**, not by which computer
+you are sitting at. Every machine you install this on gets *all* your accounts:
+`~/Projects/personal` is the personal account on your laptop and on your
+desktop alike.
+
+So install it on each machine separately — the same three commands. Each one
+generates its **own** SSH keys and uploads them to the same accounts, which is
+what you want: keys shouldn't be copied between machines, and losing one
+machine then means revoking one set of keys.
+
+A machine you have *not* installed this on has no protection at all. Git there
+will happily commit as `you@that-machine.local` and never mention it. That is
+worth doing something about sooner rather than later.
+
+If you genuinely want one machine locked to a single account, install it with
+one label (`./install.sh work`). Anything outside `~/Projects/work` will then
+refuse to commit, which is either exactly what you wanted or very annoying.
+
 ### Optional: make plain `gh` route itself
 
 ```sh
