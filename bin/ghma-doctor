@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# ghma-doctor — check the whole setup and say exactly what is wrong.
+#
+#   ghma-doctor            full check (contacts GitHub)
+#   ghma-doctor --offline  skip anything needing the network
+#
+# Run it if something looks off, after a macOS or git upgrade, or every few
+# months. The SSH-key check is the one that matters most: GitHub deletes keys
+# unused for 12 months, and that failure looks like a local SSH problem.
+
+set -uo pipefail
+
+OFFLINE=0
+[ "${1:-}" = "--offline" ] && OFFLINE=1
+
+# Assert the git version BEFORE anything else. Too-old git ignores the
+# hasconfig rules in total silence, which makes every later check report
+# plausible-but-wrong results.
+if ! command -v git >/dev/null; then echo "FAIL: git is not installed" >&2; exit 1; fi
+gitver="$(git --version | awk '{print $3}')"
+gitmaj="${gitver%%.*}"; gitrest="${gitver#*.}"; gitmin="${gitrest%%.*}"
+GIT_OK=1
+if [ "$gitmaj" -lt 2 ] || { [ "$gitmaj" -eq 2 ] && [ "$gitmin" -lt 36 ]; }; then GIT_OK=0; fi
+
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+ghma_colors 1
+
+PASS=0; WARNS=0; FAILS=0
+pass() { PASS=$((PASS+1));  printf '  %s✓%s %s\n' "$GRN" "$R" "$*"; }
+warn() { WARNS=$((WARNS+1)); printf '  %s!%s %s\n' "$YEL" "$R" "$*"; }
+fail() { FAILS=$((FAILS+1)); printf '  %s✗%s %s\n' "$RED" "$R" "$*"; }
+head_() { printf '\n%s%s%s\n' "$B" "$*" "$R"; }
+
+head_ "Environment"
+if [ "$GIT_OK" = "1" ]; then
+    pass "git $gitver (needs 2.36+ for remote-URL routing)"
+else
+    fail "git $gitver is TOO OLD — needs 2.36+"
+    echo "      Below 2.36 git ignores the remote-URL rules SILENTLY. Repos"
+    echo "      outside $PROJECTS_ROOT would stop resolving, with a misleading error."
+fi
+
+if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+    fail "GH_TOKEN/GITHUB_TOKEN is set — it overrides per-account config"
+    echo "      unset GH_TOKEN GITHUB_TOKEN"
+else
+    pass "no environment token overriding account selection"
+fi
+
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) pass "~/.local/bin is on PATH" ;;
+    *) warn "~/.local/bin is NOT on PATH — commands will be 'not found'" ;;
+esac
+
+head_ "Git configuration"
+if [ "$(git config --get user.useConfigOnly)" = "true" ]; then
+    pass "useConfigOnly is on (git won't invent an identity)"
+else
+    fail "useConfigOnly is NOT set — git will silently commit as user@hostname"
+fi
+if [ -z "$(git config --global --get user.email 2>/dev/null)" ]; then
+    pass "no global identity (correct — it would override per-account ones)"
+else
+    fail "a global user.email is set: $(git config --global --get user.email)"
+    echo "      This overrides every per-account identity. Remove it:"
+    echo "      git config --global --unset user.email"
+fi
+helper_last="$(git config --get-all credential.helper 2>/dev/null | tail -1)"
+if [ -z "$helper_last" ]; then
+    pass "credential helper disabled (no shared github.com password slot)"
+else
+    warn "credential.helper is active: $helper_last"
+    echo "      It keys on hostname only, so one account's saved password can"
+    echo "      be handed to the other."
+fi
+
+head_ "Hooks"
+hookdir="$(git config --get core.hooksPath)"
+if [ -n "$hookdir" ]; then
+    hookdir="${hookdir/#\~/$HOME}"
+    pass "core.hooksPath -> ${hookdir/#$HOME/~}"
+    for h in pre-commit pre-merge-commit post-commit pre-push; do
+        if [ -x "$hookdir/$h" ]; then pass "  $h installed"
+        else fail "  $h MISSING — that path is unguarded"; fi
+    done
+else
+    fail "core.hooksPath is not set — no identity guards are active"
+fi
+
+head_ "Accounts"
+for a in "${ACCOUNTS[@]}"; do
+    printf '\n  %s%s%s\n' "$B" "$a" "$R"
+    idf="$(ghma_identity_file "$a")"
+    key="$(ghma_ssh_key "$a")"
+    cfg="$(ghma_config_dir "$a")"
+
+    email="$(git config -f "$idf" --get user.email 2>/dev/null || true)"
+    if [ -n "$email" ]; then pass "  commits as $email"
+    else fail "  no identity — run: ghma-setup $a"; fi
+
+    if [ -f "$key" ]; then
+        perms="$(stat -f %Lp "$key" 2>/dev/null || stat -c %a "$key" 2>/dev/null)"
+        if [ "$perms" = "600" ]; then pass "  ssh key present (mode 600)"
+        else warn "  ssh key mode is $perms, should be 600"; fi
+    else
+        fail "  ssh key missing: ${key/#$HOME/~}"
+    fi
+
+    resolved="$(ssh -G "github.com-$a" 2>/dev/null | awk '/^identityfile /{print $2}' | head -1)"
+    if [ -n "$resolved" ]; then pass "  ssh alias github.com-$a -> $resolved"
+    else fail "  ssh alias github.com-$a is not configured"; fi
+
+    if [ "$OFFLINE" = "1" ]; then warn "  (skipped network checks)"; continue; fi
+
+    login="$(GH_CONFIG_DIR="$cfg" "$GH_REAL" api user --jq .login 2>/dev/null || true)"
+    if [ -n "$login" ]; then pass "  gh logged in as $login"
+    else fail "  gh not logged in — run: ghma-setup $a"; fi
+
+    out="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -T "git@github.com-$a" 2>&1 || true)"
+    who="$(echo "$out" | sed -n 's/^Hi \([^!]*\)!.*/\1/p')"
+    if [ -z "$who" ]; then
+        fail "  SSH auth FAILED: $(echo "$out" | head -1)"
+        echo "        If this says 'Permission denied', the most likely cause is"
+        echo "        GitHub deleting a key unused for 12 months. Re-add it:"
+        echo "          gha $a ssh-key add ${key}.pub --title '$a'"
+    elif [ -n "$login" ] && [ "$who" != "$login" ]; then
+        fail "  MISMATCH: ssh authenticates as $who but gh is $login"
+    else
+        pass "  SSH authenticates as $who"
+    fi
+
+    # Is our key still listed on the account? This is the early warning for
+    # the 12-month inactivity deletion, before pushes start failing.
+    if [ -f "${key}.pub" ] && [ -n "$login" ]; then
+        body="$(awk '{print $2}' "${key}.pub")"
+        if GH_CONFIG_DIR="$cfg" "$GH_REAL" api user/keys --jq '.[].key' 2>/dev/null | grep -qF "$body"; then
+            pass "  key is present on the account"
+        else
+            fail "  key is NOT on the account (deleted, or wrong account)"
+            echo "        gha $a ssh-key add ${key}.pub --title '$a'"
+        fi
+    fi
+done
+
+head_ "Summary"
+printf '  %s%s passed%s' "$GRN" "$PASS" "$R"
+[ "$WARNS" -gt 0 ] && printf ', %s%s warning(s)%s' "$YEL" "$WARNS" "$R"
+[ "$FAILS" -gt 0 ] && printf ', %s%s failure(s)%s' "$RED" "$FAILS" "$R"
+printf '\n'
+if [ "$FAILS" -gt 0 ]; then
+    printf '\n  Fix the %s✗%s items above. Most are one command.\n' "$RED" "$R"
+    exit 1
+fi
+printf '\n  Setup is healthy.\n'
+exit 0

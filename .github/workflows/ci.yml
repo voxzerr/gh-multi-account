@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint
+        run: |
+          shellcheck -S warning \
+            install.sh uninstall.sh tests/run-tests.sh \
+            bin/* hooks/* lib/*.sh
+
+  test:
+    # Runner labels are retired on a rolling basis, so track "latest" rather
+    # than pinning a version that will eventually stop resolving.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show versions
+        run: |
+          git --version
+          bash --version | head -1
+      - name: Run test suite
+        run: |
+          chmod +x tests/run-tests.sh
+          TERM=dumb ./tests/run-tests.sh
+
+  # The floor matters: below git 2.36 the remote-URL rules are ignored in
+  # total silence, so this asserts the installer refuses rather than
+  # half-working.
+  old-git-refused:
+    runs-on: ubuntu-latest
+    container: debian:bullseye     # ships git 2.30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install prerequisites
+        run: apt-get update && apt-get install -y git openssh-client curl
+      - name: Installer must refuse old git
+        run: |
+          git --version
+          mkdir -p /usr/local/bin
+          printf '#!/bin/sh\necho "gh version 0.0.0"\n' > /usr/local/bin/gh
+          chmod +x /usr/local/bin/gh
+          if bash install.sh personal work -y; then
+            echo "FAIL: installer accepted git < 2.36"
+            exit 1
+          fi
+          echo "OK: installer refused, as intended"

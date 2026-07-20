@@ -43,6 +43,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 PROJECTS_ROOT="${PROJECTS_ROOT/#\~/$HOME}"
+# Store the PHYSICAL path. git resolves symlinks when matching `gitdir:`, and
+# reports physical paths from rev-parse, so a symlinked root (a symlinked /home,
+# /tmp on macOS, an external volume) would silently never match.
+mkdir -p "$PROJECTS_ROOT" 2>/dev/null || true
+PROJECTS_ROOT="$(cd "$PROJECTS_ROOT" 2>/dev/null && pwd -P || echo "$PROJECTS_ROOT")"
 
 if [ ${#ACCOUNTS[@]} -eq 0 ]; then
     say "Which accounts do you want? These become folder names and command"
@@ -302,11 +307,22 @@ fi
 # ------------------------------------------------------------------ scripts --
 install -m 755 "$SRC/lib/account-detect.sh" "$LIBDIR/account-detect.sh"
 mkdir -p "$CFGDIR/hooks"
-install -m 755 "$SRC/hooks/pre-commit" "$CFGDIR/hooks/pre-commit"
-for f in gha gh-clone git-whoami ghma-setup; do
+# All four matter: git runs a DIFFERENT hook for merges, and runs none at all
+# for cherry-pick/revert — pre-push is the backstop for those.
+for h in pre-commit pre-merge-commit post-commit pre-push; do
+    install -m 755 "$SRC/hooks/$h" "$CFGDIR/hooks/$h"
+done
+ok "hooks installed (commit, merge, post-commit warning, push)"
+for f in gha gh-clone git-whoami ghma-setup ghma-doctor; do
     install -m 755 "$SRC/bin/$f" "$BINDIR/$f"
 done
 ok "commands installed to ${BINDIR/#$HOME/~}"
+
+# Register `git whoami` as a real alias so it works even when ~/.local/bin is
+# not on PATH — which is the case for cron, GUI-launched editors, and any
+# non-login shell.
+git config --global alias.whoami "!$BINDIR/git-whoami"
+ok "git whoami alias registered"
 
 for a in "${ACCOUNTS[@]}"; do
     printf '#!/bin/bash\nexec "%s/gha" %s "$@"\n' "$BINDIR" "$a" > "$BINDIR/gh-$a"

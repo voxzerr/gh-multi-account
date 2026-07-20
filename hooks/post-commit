@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Warns — after the fact — when a commit landed under the wrong account.
+#
+# WHY AN AFTER-THE-FACT WARNING IS WORTH HAVING
+#   cherry-pick, revert and rebase write commits without running pre-commit.
+#   Git offers no pre-hook for them at all. post-commit DOES run, so this is
+#   the earliest possible notice. It cannot block — by the time it runs the
+#   commit exists — but it tells you immediately, while the fix is still
+#   one `git commit --amend --reset-author` away instead of a rebase later.
+#
+#   pre-push is the hard block. This is the early warning.
+
+set -uo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+
+warn_and_exit() {
+    ghma_colors 2
+    printf '\n%s%sgh-multi-account: that commit used the wrong account.%s\n' "$B" "$YEL" "$R" >&2
+    printf '  %s\n' "$1" >&2
+    {
+        echo
+        echo "  The commit is already made. To correct the most recent one:"
+        echo "    git commit --amend --reset-author --no-edit"
+        echo "  It will be blocked at push time until you do."
+    } >&2
+    exit 0   # never fail the command; this is advisory
+}
+
+account="$(ghma_detect_account 2>/dev/null)" || exit 0
+expected="$(ghma_expected_email "$account" 2>/dev/null)"
+[ -n "$expected" ] || exit 0
+
+actual="$(git log -1 --format='%ae' 2>/dev/null)"
+[ -n "$actual" ] || exit 0
+
+if [ "$expected" != "$actual" ]; then
+    warn_and_exit "repo is '$account' (expects $expected) but the commit is authored by $actual"
+fi
+
+ghma_chain_repo_hook post-commit "$@"
+exit 0

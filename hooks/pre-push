@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# The hard block: refuses to push commits authored by the wrong account.
+#
+# WHY THIS IS THE IMPORTANT ONE
+#   pre-commit only runs for `git commit`. cherry-pick, revert and rebase all
+#   write commits with no pre-hook of any kind. This is the last chokepoint
+#   before those commits become someone else's problem, and it checks every
+#   commit actually being sent rather than just the current index.
+#
+#   It checks the COMMITTER as well as the author: rebase and amend rewrite
+#   the committer while preserving the original author, so an author-only
+#   check misses exactly the case these commands create.
+#
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref
+# argv:  $1 = remote name, $2 = remote URL
+#
+# Bypass deliberately:  git push --no-verify
+
+set -uo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+
+remote_name="${1:-}"
+remote_url="${2:-}"
+ghma_colors 2
+
+is_zero() { case "$1" in *[!0]*) return 1 ;; *) return 0 ;; esac; }
+
+# Prefer the account named by the URL we are actually pushing to — that is the
+# thing receiving the commits. Fall back to the repo's general resolution.
+account=""
+if [ -n "$remote_url" ]; then
+    account="$(ghma_account_for_url "$remote_url" 2>/dev/null || true)"
+fi
+[ -n "$account" ] || account="$(ghma_detect_account 2>/dev/null || true)"
+
+if [ -z "$account" ]; then
+    printf '%s%sgh-multi-account: refusing to push — this remote names no account.%s\n' "$B" "$RED" "$R" >&2
+    {
+        echo "  remote: ${remote_name:-?} ${remote_url:-?}"
+        echo "  Point it at an account so the identity is unambiguous:"
+        echo "    git remote set-url $remote_name git@github.com-<account>:owner/repo.git"
+        echo "  Deliberate? Use: git push --no-verify"
+    } >&2
+    exit 1
+fi
+
+expected="$(ghma_expected_email "$account" 2>/dev/null)"
+if [ -z "$expected" ]; then
+    printf '%s%sgh-multi-account: no identity configured for "%s".%s\n' "$B" "$RED" "$account" "$R" >&2
+    echo "  Run:  ghma-setup $account" >&2
+    exit 1
+fi
+
+bad=0
+reported=0
+MAX_REPORT=5
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "${local_sha:-}" ] || continue
+    is_zero "$local_sha" && continue          # branch deletion: nothing to check
+
+    if is_zero "${remote_sha:-0}"; then
+        # New branch on the remote. Don't walk all of history — only commits
+        # not already present on some remote-tracking ref.
+        range=("$local_sha" --not --remotes)
+    else
+        range=("$remote_sha..$local_sha")
+    fi
+
+    while read -r sha ae ce; do
+        [ -n "$sha" ] || continue
+        if [ "$ae" != "$expected" ] || [ "$ce" != "$expected" ]; then
+            bad=$((bad + 1))
+            if [ "$reported" -lt "$MAX_REPORT" ]; then
+                if [ "$reported" -eq 0 ]; then
+                    printf '%s%sgh-multi-account: refusing to push — wrong account on some commits.%s\n' "$B" "$RED" "$R" >&2
+                    printf '  Pushing to "%s", which commits as %s\n\n' "$account" "$expected" >&2
+                fi
+                printf '  %s\n' "$(git log -1 --format='%h %s' "$sha" 2>/dev/null)" >&2
+                [ "$ae" != "$expected" ] && printf '      author:    %s\n' "$ae" >&2
+                [ "$ce" != "$expected" ] && printf '      committer: %s\n' "$ce" >&2
+                reported=$((reported + 1))
+            fi
+        fi
+    done < <(git log --format='%H %ae %ce' "${range[@]}" 2>/dev/null)
+done
+
+if [ "$bad" -gt 0 ]; then
+    {
+        [ "$bad" -gt "$MAX_REPORT" ] && printf '  ...and %s more.\n' "$((bad - MAX_REPORT))"
+        echo
+        echo "  These were almost certainly made by cherry-pick, revert or rebase,"
+        echo "  which git does not run the commit hook for."
+        echo
+        echo "  Fix the most recent one:"
+        echo "    git commit --amend --reset-author --no-edit"
+        echo "  Fix a range (rewrites history — don't do this on shared branches):"
+        echo "    git rebase -r --exec 'git commit --amend --reset-author --no-edit' <base>"
+        echo
+        echo "  Deliberate? Use: git push --no-verify"
+    } >&2
+    exit 1
+fi
+
+ghma_chain_repo_hook pre-push "$@"
+exit 0

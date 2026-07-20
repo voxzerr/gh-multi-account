@@ -133,10 +133,22 @@ silently. The real `gh` is still used underneath.
 
 ---
 
+## Checking on it
+
+```sh
+ghma-doctor            # check everything and say what's wrong
+ghma-doctor --offline  # skip the network checks
+```
+
+Worth running after a macOS or git upgrade, or if anything looks odd. The most
+useful thing it catches is a deleted SSH key — see *Things that will eventually
+happen* below.
+
+---
+
 ## The safety nets
 
-Five layers. Each catches something the others can't, and all of them fail
-loudly.
+Each layer catches something the others can't, and all of them fail loudly.
 
 1. **No global identity + `user.useConfigOnly`** — a repo matching no account
    can't commit at all. Catches a *missing* identity.
@@ -145,15 +157,61 @@ loudly.
    offers first. Catches an *ambiguous remote*.
 3. **The credential helper is switched off** — see below. Catches a *shared
    HTTPS credential*.
-4. **A pre-commit hook** compares the identity git would actually use against
+4. **Commit-time hooks** compare the identity git would actually use against
    the account the repo resolves to. Catches a *wrong but present* identity —
    a repo-local `user.email`, or a `GIT_AUTHOR_EMAIL` env var, pointing at the
    other account. Layers 1–3 all miss this.
-5. **`gha` refuses to guess**, and refuses to run at all if `GH_TOKEN` /
+5. **A pre-push guard** re-checks every commit being pushed, author *and*
+   committer. This is the backstop for commits that never saw a commit hook.
+6. **`gha` refuses to guess**, and refuses to run at all if `GH_TOKEN` /
    `GITHUB_TOKEN` is set, since an environment token silently outranks the
    per-account config.
+7. **Repos with remotes for two different accounts are refused** rather than
+   resolved by config ordering, which is arbitrary.
 
-Bypass layer 4 deliberately with `git commit --no-verify`.
+### Which git commands are actually checked
+
+This matters more than it sounds, and it is the reason the push guard exists.
+Git does not run `pre-commit` for everything that creates a commit:
+
+| Command | What protects it |
+|---|---|
+| `git commit`, `git commit --amend` | `pre-commit` — blocked before it happens |
+| `git merge --no-ff` | `pre-merge-commit` — blocked before it happens |
+| `git cherry-pick`, `git revert`, `git rebase` | **no pre-hook exists.** `post-commit` warns immediately; `pre-push` blocks |
+
+So a cherry-picked commit under the wrong account *can* be created — you get an
+immediate warning, and it cannot leave your machine. All of this is covered by
+the test suite.
+
+Bypass deliberately with `--no-verify` (works on commit, merge and push).
+
+Repos that set `core.hooksPath` themselves — husky, the `pre-commit` framework
+— override the global hooks and lose layers 4 and 5. They keep working; they
+are just unprotected. Your own repo hooks still run: the global hooks chain to
+them.
+
+---
+
+## Things that will eventually happen
+
+Not bugs, just facts worth knowing before they confuse you at 2am.
+
+**GitHub deletes SSH keys unused for 12 months.** If one account goes dormant
+for a year, its key is deleted and pushes start failing with
+`Permission denied (publickey)` — which reads like a local SSH problem, not an
+account event. `ghma-doctor` checks for this explicitly. To fix:
+`gha <account> ssh-key add ~/.ssh/id_ed25519_github_<account>.pub --title '<account>'`
+
+**Revoking gh's authorization on GitHub deletes the SSH key it uploaded.** So
+"tidying up authorized OAuth apps" breaks git, not just the CLI. Same fix.
+
+**Joining an org with SAML/SSO** requires authorizing each SSH key for that org
+through the browser. There is no CLI path for it.
+
+**GitHub host key rotation** would show as
+`WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!` for every account at once.
+It has happened once, in March 2023. Re-run the installer to re-pin.
 
 ---
 
@@ -201,18 +259,44 @@ same public key on a second account.
 
 ---
 
+**Symlinked paths are handled, but only because they were caught.** `git
+rev-parse` reports physical paths and git resolves symlinks when matching
+`gitdir:`, so a projects root reached through a symlink (a symlinked `/home`,
+an external volume, `/tmp` on macOS) would compare unequal as a plain string
+and make every repo look unaffiliated. Paths are normalised on both sides.
+
+---
+
+## Development
+
+```sh
+tests/run-tests.sh              # 29 tests, ~30s
+KEEP_SANDBOX=1 tests/run-tests.sh   # keep the sandbox to poke at
+```
+
+Everything runs in a throwaway `HOME` and stubs `gh`, so no network, no GitHub
+account, and your real setup is never touched. `install.sh` and `uninstall.sh`
+are exercised by the suite rather than mocked. CI additionally runs shellcheck
+and asserts the installer *refuses* git older than 2.36.
+
+---
+
 ## Limitations
 
-- Repos that set `core.hooksPath` themselves (husky, the `pre-commit`
-  framework) override the global hook and lose layer 4. They keep working, they
-  just aren't protected. `git whoami` still reports correctly.
 - `gh repo clone` writes an account-less remote and will therefore fail. Use
   `gh-clone` instead.
 - SSH keys are generated without a passphrase. Add one with
   `ssh-keygen -p -f ~/.ssh/id_ed25519_github_<account>`; `UseKeychain` is
   already configured so you'd only be asked once.
-- Only tested against github.com. GitHub Enterprise would need the host aliases
-  adjusting.
+- Only tested against github.com. GitHub Enterprise Cloud needs more than a
+  hostname change — GHE.com uses the enterprise subdomain as the SSH *username*
+  instead of `git`, which the host alias blocks assume.
+- GUIs that reimplement git's config parsing rather than shelling out to it —
+  libgit2-based tools such as TortoiseGit — don't support `hasconfig`, so they
+  can miss the remote-URL rule. Tools that shell out to `git` (VS Code's built-in
+  git, Git Credential Manager) are fine.
+- Cherry-pick and revert can create a wrong-account commit locally before you
+  are told. It cannot be pushed. See the coverage table above.
 
 ## License
 

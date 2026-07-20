@@ -17,10 +17,14 @@ if [ -n "${GH_CONFIG_DIR:-}" ]; then
     exec "$GH_REAL" "$@"
 fi
 
-# Commands with no account context: pass straight through.
-if [ $# -eq 0 ] || [[ "${1:-}" == -* ]] || [ "${1:-}" = "help" ] || [ "${1:-}" = "version" ] || [ "${1:-}" = "completion" ]; then
-    exec "$GH_REAL" "$@"
-fi
+# Pass through only things that genuinely carry no account context. This is an
+# allowlist on purpose: a blanket "starts with a dash" rule let real commands
+# like `gh -R owner/repo pr list` through with no GH_CONFIG_DIR, silently using
+# the default config instead of an account.
+case "${1:-}" in
+    ""|help|version|completion|--version|-v|--help|-h)
+        exec "$GH_REAL" "$@" ;;
+esac
 
 if account="$(ghma_detect_account)"; then
     GH_CONFIG_DIR="$(ghma_config_dir "$account")"

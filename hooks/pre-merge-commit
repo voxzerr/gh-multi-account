@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Blocks merge commits under the wrong account.
+#
+# `git merge --no-ff` does NOT run pre-commit — it runs this hook instead.
+# Without it, merge commits were completely unchecked.
+#
+# Bypass deliberately:  git merge --no-verify
+
+set -uo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+
+ghma_verify_pending_identity || exit 1
+ghma_chain_repo_hook pre-merge-commit "$@"
+exit 0
