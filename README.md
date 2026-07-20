@@ -1,5 +1,7 @@
 # gh-multi-account
 
+[![CI](https://github.com/voxzerr/gh-multi-account/actions/workflows/ci.yml/badge.svg)](https://github.com/voxzerr/gh-multi-account/actions/workflows/ci.yml)
+
 Use two (or more) GitHub accounts on one machine without ever mixing them up.
 
 No switching. No "which account am I on right now?" Each repo knows which
