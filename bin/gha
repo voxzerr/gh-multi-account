@@ -1,0 +1,64 @@
+#!/bin/bash
+# gha — run gh as a specific account, or auto-detect it from the current repo.
+#
+#   gha <account> <gh args...>   run gh as that account, anywhere
+#   gha auto <gh args...>        pick the account from the current repo
+#   gha accounts                 list configured accounts and their logins
+#
+# Isolation is by GH_CONFIG_DIR: each account has its own gh config directory,
+# so nothing global is mutated and concurrent shells cannot affect each other.
+
+set -uo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+ghma_guard_env_token
+
+usage() {
+    {
+        echo "usage: gha <account|auto> <gh arguments...>"
+        echo
+        echo "configured accounts:"
+        for a in "${ACCOUNTS[@]}"; do echo "  $a"; done
+        echo
+        echo "examples:"
+        echo "  gha ${ACCOUNTS[0]} auth login"
+        echo "  gha ${ACCOUNTS[0]} repo list"
+        echo "  gha auto pr create        # uses the current repo's account"
+        echo "  gha accounts              # who is logged in where"
+    } >&2
+    exit 2
+}
+
+[ $# -ge 1 ] || usage
+sub="$1"; shift
+
+if [ "$sub" = "accounts" ]; then
+    for a in "${ACCOUNTS[@]}"; do
+        cfg="$(ghma_config_dir "$a")"
+        login="$(GH_CONFIG_DIR="$cfg" "$GH_REAL" api user --jq .login 2>/dev/null)"
+        printf '  %-12s %s\n' "$a" "${login:-(not logged in)}"
+    done
+    exit 0
+fi
+
+if [ "$sub" = "auto" ]; then
+    if ! sub="$(ghma_detect_account)"; then
+        {
+            echo "gha: cannot tell which account this directory belongs to."
+            echo "  Name one explicitly:  gha <account> $*"
+            echo "  Configured accounts:  ${ACCOUNTS[*]}"
+        } >&2
+        exit 2
+    fi
+fi
+
+if ! ghma_is_account "$sub"; then
+    echo "gha: '$sub' is not a configured account." >&2
+    usage
+fi
+
+[ $# -ge 1 ] || usage
+
+GH_CONFIG_DIR="$(ghma_config_dir "$sub")"
+export GH_CONFIG_DIR
+exec "$GH_REAL" "$@"

@@ -1,0 +1,48 @@
+#!/bin/bash
+# Optional 'gh' shim — installed as ~/.local/bin/gh only with --shadow-gh.
+#
+# Routes gh to the account the current repo belongs to, using the same rules
+# git uses for commit identity, so the two can never disagree. If it cannot
+# tell which account you mean, it refuses instead of guessing.
+#
+# The real gh binary is recorded as GH_REAL in the config file.
+
+set -euo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+ghma_guard_env_token
+
+# An explicitly-set GH_CONFIG_DIR wins — that is how gha invokes us.
+if [ -n "${GH_CONFIG_DIR:-}" ]; then
+    exec "$GH_REAL" "$@"
+fi
+
+# Commands with no account context: pass straight through.
+if [ $# -eq 0 ] || [[ "${1:-}" == -* ]] || [ "${1:-}" = "help" ] || [ "${1:-}" = "version" ] || [ "${1:-}" = "completion" ]; then
+    exec "$GH_REAL" "$@"
+fi
+
+if account="$(ghma_detect_account)"; then
+    GH_CONFIG_DIR="$(ghma_config_dir "$account")"
+    export GH_CONFIG_DIR
+    exec "$GH_REAL" "$@"
+fi
+
+{
+    echo "gh: cannot tell which account you mean here, so I am not guessing."
+    echo
+    echo "This directory is not a repo that names an account, and is not under"
+    echo "$PROJECTS_ROOT/<account>."
+    echo
+    echo "Name the account explicitly:"
+    for a in "${ACCOUNTS[@]}"; do echo "    gh-$a $*"; done
+    echo
+    echo "Or clone it so it identifies itself:"
+    echo "    gh-clone ${ACCOUNTS[0]} owner/repo"
+    echo
+    echo "Or point an existing repo's remote at an account:"
+    echo "    git remote set-url origin git@github.com-${ACCOUNTS[0]}:owner/repo.git"
+    echo
+    echo "Check any repo with:  git whoami"
+} >&2
+exit 2

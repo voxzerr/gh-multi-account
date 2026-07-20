@@ -1,0 +1,46 @@
+#!/bin/bash
+# gh-clone — clone a repo under the right account, with the right remote.
+#
+#   gh-clone <account> <owner/repo> [directory]
+#
+# Why this exists: `gh repo clone` and plain `git clone` both write a remote of
+# the form git@github.com:owner/repo.git, which names no account. This clones
+# with the account's host alias baked into the remote URL, so the repo
+# identifies itself from then on and commit identity resolves automatically.
+
+set -uo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+
+usage() {
+    {
+        echo "usage: gh-clone <account> <owner/repo> [directory]"
+        echo "accounts: ${ACCOUNTS[*]}"
+    } >&2
+    exit 2
+}
+
+[ $# -ge 2 ] || usage
+account="$1"; repo="$2"; dirname="${3:-}"
+
+ghma_is_account "$account" || { echo "gh-clone: unknown account '$account'" >&2; usage; }
+case "$repo" in
+    */*) ;;
+    *) echo "gh-clone: repo must be owner/repo, got '$repo'" >&2; usage ;;
+esac
+
+[ -n "$dirname" ] || dirname="${repo##*/}"
+dest="$PROJECTS_ROOT/$account/$dirname"
+
+if [ -e "$dest" ]; then
+    echo "gh-clone: $dest already exists; refusing to overwrite." >&2
+    exit 1
+fi
+
+mkdir -p "$PROJECTS_ROOT/$account"
+echo "Cloning $repo as $account -> $dest"
+git clone "git@github.com-$account:$repo.git" "$dest" || exit 1
+
+cd "$dest" || exit 1
+echo
+git whoami

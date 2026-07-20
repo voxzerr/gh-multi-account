@@ -1,0 +1,107 @@
+#!/bin/bash
+# git whoami — show which GitHub account this repo will act as.
+# Installed as git-whoami so `git whoami` works as a subcommand.
+#
+#   git whoami            report identity for the current repo
+#   git whoami --check    additionally test the live SSH connection per account
+
+set -uo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+
+if [ -t 1 ]; then
+    B=$(tput bold); R=$(tput sgr0)
+    RED=$(tput setaf 1); GRN=$(tput setaf 2); YEL=$(tput setaf 3); DIM=$(tput setaf 8)
+else
+    B=""; R=""; RED=""; GRN=""; YEL=""; DIM=""
+fi
+
+CHECK=0
+[ "${1:-}" = "--check" ] && CHECK=1
+
+toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$toplevel" ]; then
+    echo "${YEL}Not inside a git repository.${R}"
+    echo "Current directory: $(pwd)"
+    exit 1
+fi
+
+url="$(git config --get remote.origin.url 2>/dev/null)"
+
+account=""; why=""
+if [ -n "$url" ]; then
+    for a in "${ACCOUNTS[@]}"; do
+        case "$url" in
+            *github.com-"$a":*|*github.com-"$a"/*) account="$a"; why="from remote URL"; break ;;
+        esac
+    done
+fi
+if [ -z "$account" ]; then
+    for a in "${ACCOUNTS[@]}"; do
+        case "$toplevel/" in
+            "$PROJECTS_ROOT/$a/"*) account="$a"; why="from directory ($PROJECTS_ROOT/$a)"; break ;;
+        esac
+    done
+fi
+
+name="$(git config --get user.name 2>/dev/null)"
+email="$(git config --get user.email 2>/dev/null)"
+
+printf '%sRepo%s        %s\n' "$B" "$R" "$toplevel"
+
+if [ -n "$account" ]; then
+    printf '%sAccount%s     %s%s%s  %s(%s)%s\n' "$B" "$R" "$GRN" "$account" "$R" "$DIM" "$why" "$R"
+else
+    printf '%sAccount%s     %sUNRESOLVED%s\n' "$B" "$R" "$RED" "$R"
+fi
+
+if [ -n "$email" ]; then
+    printf '%sCommits as%s  %s <%s>\n' "$B" "$R" "$name" "$email"
+else
+    printf '%sCommits as%s  %sNOTHING — commits are blocked here%s\n' "$B" "$R" "$RED" "$R"
+fi
+
+if [ -n "$url" ]; then
+    printf '%sRemote%s      %s\n' "$B" "$R" "$url"
+    case "$url" in
+        *github.com:*|*//github.com/*)
+            printf '            %s^ names no account. Fix with:%s\n' "$YEL" "$R"
+            printf '              git remote set-url origin git@github.com-ACCOUNT:owner/repo.git\n' ;;
+    esac
+else
+    printf '%sRemote%s      %s(none yet)%s\n' "$B" "$R" "$DIM" "$R"
+fi
+
+if [ -n "$account" ]; then
+    cfg="$(ghma_config_dir "$account")"
+    ghlogin="$(GH_CONFIG_DIR="$cfg" "$GH_REAL" api user --jq .login 2>/dev/null)"
+    if [ -n "$ghlogin" ]; then
+        printf '%sgh CLI%s      logged in as %s%s%s\n' "$B" "$R" "$GRN" "$ghlogin" "$R"
+    else
+        printf '%sgh CLI%s      %snot logged in%s — run: gha %s auth login\n' "$B" "$R" "$YEL" "$R" "$account"
+    fi
+fi
+
+if [ -z "$email" ]; then
+    echo
+    printf '%sCommits are blocked in this repo.%s That is the safety net working:\n' "$YEL" "$R"
+    echo "git will not invent an identity from your hostname. To fix, either:"
+    for a in "${ACCOUNTS[@]}"; do echo "  - move the repo under $PROJECTS_ROOT/$a, or"; done
+    echo "  - point its remote at an account alias (see above), or"
+    echo "  - set an identity for just this repo:  git config user.email you@example.com"
+fi
+
+if [ "$CHECK" = "1" ]; then
+    echo
+    printf '%sLive SSH check%s\n' "$B" "$R"
+    for a in "${ACCOUNTS[@]}"; do
+        out="$(ssh -o BatchMode=yes -o ConnectTimeout=8 -T "git@github.com-$a" 2>&1 || true)"
+        who="$(echo "$out" | sed -n 's/^Hi \([^!]*\)!.*/\1/p')"
+        if [ -n "$who" ]; then
+            marker="  "; [ "$a" = "$account" ] && marker="${GRN}->${R}"
+            printf '  %s %-12s authenticates as %s%s%s\n' "$marker" "$a" "$GRN" "$who" "$R"
+        else
+            printf '     %-12s %snot working%s %s(%s)%s\n' "$a" "$RED" "$R" "$DIM" "$(echo "$out" | head -1)" "$R"
+        fi
+    done
+fi

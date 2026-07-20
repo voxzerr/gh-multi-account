@@ -1,0 +1,78 @@
+#!/bin/bash
+# Global pre-commit guard — refuse to commit under the wrong account.
+# Wired up via core.hooksPath.
+#
+# WHY THIS EXISTS
+#   user.useConfigOnly catches a MISSING identity. It cannot catch a WRONG one.
+#   Both of these slip past it:
+#     git config --local user.email <the other account>
+#     GIT_AUTHOR_EMAIL=<the other account> git commit
+#   This compares the identity git would actually use against the account the
+#   repo resolves to, and stops the commit if they disagree.
+#
+#   Repos that set core.hooksPath themselves (husky, the pre-commit framework)
+#   override this and lose the guard. They keep working; they are just
+#   unprotected.
+#
+# Bypass deliberately for one commit:  git commit --no-verify
+
+set -uo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+
+if [ -t 2 ]; then RED=$(tput setaf 1); B=$(tput bold); R=$(tput sgr0); else RED=""; B=""; R=""; fi
+fail() { printf '%s%spre-commit: %s%s\n' "$B" "$RED" "$1" "$R" >&2; }
+
+if ! account="$(ghma_detect_account)"; then
+    fail "this repo does not name a GitHub account, so I will not commit."
+    {
+        echo "  Nothing identifies this repo as one of: ${ACCOUNTS[*]}"
+        echo "  Fix with either:"
+        echo "    git remote set-url origin git@github.com-<account>:owner/repo.git"
+        echo "    or move the repo under $PROJECTS_ROOT/<account>"
+        echo "  See: git whoami"
+    } >&2
+    exit 1
+fi
+
+idfile="$(ghma_identity_file "$account")"
+expected="$(git config -f "$idfile" --get user.email 2>/dev/null)"
+
+if [ -z "$expected" ]; then
+    fail "no identity configured for the '$account' account yet."
+    echo "  Run:  ghma-setup $account" >&2
+    exit 1
+fi
+
+# git var resolves EVERYTHING — config, includes, and env overrides.
+actual="$(git var GIT_AUTHOR_IDENT 2>/dev/null | sed -n 's/.*<\(.*\)>.*/\1/p')"
+
+if [ "$expected" != "$actual" ]; then
+    fail "WRONG ACCOUNT — commit stopped."
+    {
+        echo "  This repo belongs to:  $account"
+        echo "  which commits as:      $expected"
+        echo "  but git would use:     $actual"
+        echo
+        echo "  Something is overriding the account identity. Check:"
+        echo "    git config --show-origin --get-all user.email"
+        echo "    env | grep GIT_AUTHOR"
+        echo
+        echo "  If this is deliberate:  git commit --no-verify"
+    } >&2
+    exit 1
+fi
+
+# Chain to the repo's own pre-commit hook, which core.hooksPath would otherwise
+# suppress. Do NOT use `git rev-parse --git-path hooks/pre-commit` here:
+# --git-path honours core.hooksPath, so it resolves to THIS file and exec'ing
+# it loops forever, hanging every commit. The -ef test is a second guard.
+gitdir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
+if [ -n "$gitdir" ]; then
+    repo_hook="$gitdir/hooks/pre-commit"
+    if [ -x "$repo_hook" ] && ! [ "$repo_hook" -ef "$0" ]; then
+        exec "$repo_hook" "$@"
+    fi
+fi
+
+exit 0

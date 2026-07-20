@@ -1,0 +1,162 @@
+#!/bin/bash
+# ghma-setup — sign in to an account and wire up its commit identity.
+#
+#   ghma-setup              set up every configured account
+#   ghma-setup <account>    set up just one
+#
+# Safe to re-run: it skips anything already done. The browser sign-in is the
+# only part that needs a human.
+
+set -uo pipefail
+# shellcheck source=../lib/account-detect.sh
+. "${GHMA_LIB:-$HOME/.local/libexec/gh-multi-account}/account-detect.sh"
+ghma_guard_env_token
+
+if [ -t 1 ]; then
+    B=$(tput bold); R=$(tput sgr0); RED=$(tput setaf 1); GRN=$(tput setaf 2); YEL=$(tput setaf 3); DIM=$(tput setaf 8)
+else
+    B=""; R=""; RED=""; GRN=""; YEL=""; DIM=""
+fi
+hr() { printf '%s%s%s\n' "$DIM" "────────────────────────────────────────────────────────────" "$R"; }
+
+TARGETS=("${ACCOUNTS[@]}")
+if [ $# -ge 1 ]; then
+    ghma_is_account "$1" || { echo "ghma-setup: unknown account '$1' (have: ${ACCOUNTS[*]})" >&2; exit 2; }
+    TARGETS=("$1")
+fi
+
+setup_account() {
+    local acct="$1"
+    local cfg key idfile login
+    cfg="$(ghma_config_dir "$acct")"
+    key="$(ghma_ssh_key "$acct")"
+    idfile="$(ghma_identity_file "$acct")"
+
+    hr; printf '%sAccount: %s%s\n' "$B" "$acct" "$R"; hr
+
+    # ------------------------------------------------------------- sign in --
+    login="$(GH_CONFIG_DIR="$cfg" "$GH_REAL" api user --jq .login 2>/dev/null)"
+    if [ -n "$login" ]; then
+        printf '  %s✓%s already signed in as %s%s%s\n' "$GRN" "$R" "$B" "$login" "$R"
+    else
+        echo
+        echo "  You will get a one-time code, then a browser window."
+        printf '  %sMake sure the browser is signed in to the account you want as'\
+' "%s".%s\n' "$YEL" "$acct" "$R"
+        echo
+        read -r -p "  Press Enter to continue (Ctrl-C to stop)... " _
+
+        # Flag notes: there is NO --ssh-key flag in gh. --skip-ssh-key avoids
+        # gh's interactive key prompt (which could upload the wrong key when
+        # several exist, or generate an unwanted one); the key is uploaded
+        # explicitly below. admin:public_key is what `gh ssh-key add` needs.
+        # --insecure-storage: gh's keychain entry is named per HOST, not per
+        # config dir, so accounts would share one keychain slot. A token file
+        # per config dir makes the separation a filesystem fact instead.
+        GH_CONFIG_DIR="$cfg" "$GH_REAL" auth login \
+            --hostname github.com \
+            --git-protocol ssh \
+            --skip-ssh-key \
+            --scopes admin:public_key \
+            --insecure-storage \
+            --web
+        local rc=$?
+        chmod 600 "$cfg/hosts.yml" 2>/dev/null
+        [ $rc -eq 0 ] || { printf '  %s✗%s sign-in did not complete (exit %s).\n' "$RED" "$R" "$rc"; return 1; }
+
+        login="$(GH_CONFIG_DIR="$cfg" "$GH_REAL" api user --jq .login 2>/dev/null)"
+        [ -n "$login" ] || { printf '  %s✗%s signed in but could not read the account.\n' "$RED" "$R"; return 1; }
+        printf '  %s✓%s signed in as %s%s%s\n' "$GRN" "$R" "$B" "$login" "$R"
+    fi
+
+    # -------------------------------------------------- duplicate detection --
+    local other otherlogin
+    for other in "${ACCOUNTS[@]}"; do
+        [ "$other" = "$acct" ] && continue
+        otherlogin="$(GH_CONFIG_DIR="$(ghma_config_dir "$other")" "$GH_REAL" api user --jq .login 2>/dev/null)"
+        if [ -n "$otherlogin" ] && [ "$otherlogin" = "$login" ]; then
+            printf '  %s✗ PROBLEM:%s "%s" and "%s" are both signed in as %s.\n' "$RED" "$R" "$acct" "$other" "$login"
+            echo "    These are meant to be different accounts."
+            echo "    Redo this one:  gha $acct auth logout && ghma-setup $acct"
+            return 1
+        fi
+    done
+
+    # ------------------------------------------------------- upload ssh key --
+    local keybody
+    keybody="$(awk '{print $2}' "${key}.pub" 2>/dev/null)"
+    if [ -z "$keybody" ]; then
+        printf '  %s✗%s missing public key %s\n' "$RED" "$R" "${key}.pub"; return 1
+    fi
+    if GH_CONFIG_DIR="$cfg" "$GH_REAL" api user/keys --jq '.[].key' 2>/dev/null | grep -qF "$keybody"; then
+        printf '  %s✓%s SSH key already on this account\n' "$GRN" "$R"
+    else
+        if GH_CONFIG_DIR="$cfg" "$GH_REAL" ssh-key add "${key}.pub" \
+             --title "$(scutil --get LocalHostName 2>/dev/null || hostname) ($acct)" >/dev/null 2>&1; then
+            printf '  %s✓%s uploaded SSH key\n' "$GRN" "$R"
+        else
+            printf '  %s✗%s could not upload the SSH key.\n' "$RED" "$R"
+            echo "    Try:  gha $acct auth refresh -s admin:public_key"
+            echo "          gha $acct ssh-key add ${key}.pub --title '$acct'"
+            return 1
+        fi
+    fi
+
+    # ---------------------------------------------------------- identity --
+    local uid name email suggested
+    uid="$(GH_CONFIG_DIR="$cfg" "$GH_REAL" api user --jq .id 2>/dev/null)"
+    name="$(GH_CONFIG_DIR="$cfg" "$GH_REAL" api user --jq '.name // ""' 2>/dev/null)"
+    [ -z "$name" ] && name="$login"
+    suggested="${uid}+${login}@users.noreply.github.com"
+
+    echo
+    echo "  Commit identity for $acct repos:"
+    printf '    name   %s\n' "$name"
+    printf '    email  %s\n' "$suggested"
+    printf '           %s(GitHub no-reply — keeps your real address out of public\n' "$DIM"
+    printf '           commit history, and still links commits to your profile)%s\n' "$R"
+    echo
+    read -r -p "  Press Enter to accept, or type a different email: " email
+    [ -z "$email" ] && email="$suggested"
+
+    cat > "$idfile" <<EOF
+# Identity for the "${acct}" account (@${login}).
+# Written by ghma-setup. Re-run it to regenerate.
+[user]
+	name = ${name}
+	email = ${email}
+[github]
+	user = ${login}
+EOF
+    printf '  %s✓%s wrote %s\n' "$GRN" "$R" "${idfile/#$HOME/~}"
+
+    # --------------------------------------------------------- verify ssh --
+    local sshout sshwho
+    sshout="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -T "git@github.com-$acct" 2>&1)"
+    sshwho="$(echo "$sshout" | sed -n 's/^Hi \([^!]*\)!.*/\1/p')"
+    if [ -z "$sshwho" ]; then
+        printf '  %s✗%s SSH not working yet: %s\n' "$RED" "$R" "$(echo "$sshout" | head -1)"
+        return 1
+    elif [ "$sshwho" != "$login" ]; then
+        printf '  %s✗ MISMATCH:%s SSH is %s but the CLI is %s.\n' "$RED" "$R" "$sshwho" "$login"
+        return 1
+    fi
+    printf '  %s✓%s SSH authenticates as %s%s%s\n' "$GRN" "$R" "$B" "$sshwho" "$R"
+    return 0
+}
+
+FAILED=0
+for a in "${TARGETS[@]}"; do setup_account "$a" || FAILED=1; done
+
+echo; hr
+if [ "$FAILED" = "0" ]; then
+    printf '%sDone.%s\n\n' "$B" "$R"
+    echo "  gh-clone ${ACCOUNTS[0]} owner/repo    clone into $PROJECTS_ROOT/${ACCOUNTS[0]}"
+    echo "  git whoami                            which account is this repo?"
+    echo "  git whoami --check                    ...and test SSH for each account"
+    echo "  gha accounts                          who is logged in where"
+else
+    printf '%sSome steps did not complete.%s Fix the ✗ items and re-run.\n' "$YEL" "$R"
+fi
+hr
+[ "$FAILED" = "0" ]
